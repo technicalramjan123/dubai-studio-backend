@@ -140,12 +140,20 @@ def _process_job(session, job: Job):
             # Synthesize
             chunk_tts_path = os.path.join(wd, f"chunk_{chunk.index}_dub.mp3")
             tts.synthesize(translated, job.target_language, job.voice or "male", chunk_tts_path)
-            chunk.audio_chunk_path = chunk_tts_path
+
+            # Stretch/compress the generated speech to match the original
+            # chunk's exact duration so the dub doesn't drift out of sync
+            # with the video as chunks accumulate.
+            target_duration = chunk.end_time - chunk.start_time
+            fitted_path = os.path.join(wd, f"chunk_{chunk.index}_fitted.mp3")
+            extract.fit_audio_duration(chunk_tts_path, target_duration, fitted_path)
+
+            chunk.audio_chunk_path = fitted_path
             chunk.status = "done"
             chunk.error_message = None
             session.commit()
 
-            translated_audio_paths.append(chunk_tts_path)
+            translated_audio_paths.append(fitted_path)
 
         except Exception as e:
             chunk.retry_count += 1
@@ -163,11 +171,16 @@ def _process_job(session, job: Job):
                             t["text"], detected_source_lang, job.target_language)
                     tts.synthesize(chunk.translated_text, job.target_language,
                                     job.voice or "male", chunk_tts_path)
-                    chunk.audio_chunk_path = chunk_tts_path
+
+                    target_duration = chunk.end_time - chunk.start_time
+                    fitted_path = os.path.join(wd, f"chunk_{chunk.index}_fitted.mp3")
+                    extract.fit_audio_duration(chunk_tts_path, target_duration, fitted_path)
+
+                    chunk.audio_chunk_path = fitted_path
                     chunk.status = "done"
                     chunk.error_message = None
                     session.commit()
-                    translated_audio_paths.append(chunk_tts_path)
+                    translated_audio_paths.append(fitted_path)
                     continue
                 except Exception as e2:
                     chunk.error_message = str(e2)

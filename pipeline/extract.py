@@ -112,3 +112,57 @@ def merge_audio_with_video(video_path: str, audio_path: str, out_path: str):
         out_path
     ])
     return out_path
+
+
+def _build_atempo_chain(ratio: float) -> str:
+    """ffmpeg's atempo filter only accepts 0.5-2.0 per instance, so chain
+    multiple atempo filters together to reach ratios outside that range."""
+    if ratio <= 0:
+        ratio = 1.0
+    filters = []
+    r = ratio
+    while r > 2.0:
+        filters.append(2.0)
+        r /= 2.0
+    while r < 0.5:
+        filters.append(0.5)
+        r /= 0.5
+    filters.append(r)
+    return ",".join(f"atempo={f:.6f}" for f in filters)
+
+
+def fit_audio_duration(audio_path: str, target_duration: float, out_path: str):
+    """
+    Stretches or compresses a dubbed audio chunk (via ffmpeg's atempo filter)
+    so it matches the original chunk's duration exactly, then pads/trims any
+    tiny remainder with silence. This keeps the dubbed track in sync with
+    the original video instead of drifting further out of sync with every
+    chunk (which happens because translated speech is rarely the same
+    length as the original).
+    """
+    if target_duration <= 0.05:
+        target_duration = 0.05
+
+    current = get_duration_seconds(audio_path)
+    if current <= 0.05:
+        # Nothing usable was generated — output silence of the right length.
+        run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+             "-t", str(target_duration), out_path])
+        return out_path
+
+    ratio = current / target_duration
+    atempo_expr = _build_atempo_chain(ratio)
+
+    tmp_path = out_path + ".stretch.mp3"
+    run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", atempo_expr, tmp_path])
+
+    # Pad with silence or trim so the final length matches exactly —
+    # atempo chaining can leave it off by a few milliseconds.
+    run([
+        "ffmpeg", "-y", "-i", tmp_path,
+        "-af", f"apad=whole_dur={target_duration}",
+        "-t", str(target_duration),
+        out_path
+    ])
+    os.remove(tmp_path)
+    return out_path
