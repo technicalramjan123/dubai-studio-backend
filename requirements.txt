@@ -5,4 +5,10 @@ sqlalchemy==2.0.30
 requests==2.32.3
 edge-tts==6.1.12
 yt-dlp==2024.8.6
+
+# CPU-only torch build — much smaller download and faster build than
+# the default GPU build, and this project never uses a GPU.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+
 openai-whisper==20231117
