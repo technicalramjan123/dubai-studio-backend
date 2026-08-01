@@ -1,9 +1,9 @@
 # DubAI Studio — Backend
 
 Free/open-source AI dubbing backend: yt-dlp (link download) + ffmpeg
-(extraction/chunking/merging) + Whisper (transcription) + LibreTranslate
-(translation, with a free Google Translate fallback) + Edge-TTS (voice
-generation, generic voices — no cloning).
+(extraction/chunking/merging) + faster-whisper (transcription, no GPU
+needed) + LibreTranslate (translation, with a free Google Translate
+fallback) + Edge-TTS (voice generation, generic voices — no cloning).
 
 Built for long files (up to 3 hours) via silence-aware chunked processing,
 with per-chunk retry and resumable jobs.

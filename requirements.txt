@@ -6,9 +6,9 @@ requests==2.32.3
 edge-tts==6.1.12
 yt-dlp==2024.8.6
 
-# CPU-only torch build — much smaller download and faster build than
-# the default GPU build, and this project never uses a GPU.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.2+cpu
-
-openai-whisper==20231117
+# faster-whisper: same Whisper models, but built on CTranslate2 instead
+# of torch/triton. Ships prebuilt wheels (nothing to compile), much
+# lighter and faster — a better fit for free-tier hosting than
+# openai-whisper, which pulls in torch+triton and frequently fails to
+# build on minimal containers.
+faster-whisper==1.0.3

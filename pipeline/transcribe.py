@@ -1,21 +1,22 @@
 """
-Speech-to-text using OpenAI's open-source Whisper model, run locally
-(no paid API). Uses the "base" model by default — a good balance of
-accuracy and memory/CPU usage for free-tier hosting. Set the
-WHISPER_MODEL_SIZE env var to "tiny" for even lighter resource usage,
-or "small"/"medium" if the host has more RAM available.
+Speech-to-text using faster-whisper (CTranslate2-based reimplementation
+of OpenAI's open-source Whisper models). Chosen over the original
+openai-whisper package because it ships prebuilt wheels (nothing to
+compile) and doesn't require torch/triton -- much more reliable to
+build on minimal/free-tier hosting like Railway, and faster on CPU.
 """
 import os
-import whisper
+from faster_whisper import WhisperModel
 
 _model = None
 _model_size = os.environ.get("WHISPER_MODEL_SIZE", "base")
+_compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 = lowest RAM usage
 
 
 def get_model():
     global _model
     if _model is None:
-        _model = whisper.load_model(_model_size)
+        _model = WhisperModel(_model_size, device="cpu", compute_type=_compute_type)
     return _model
 
 
@@ -26,12 +27,12 @@ def transcribe_chunk(audio_path: str, source_language_hint: str = None):
     subsequent chunks once the language is known from chunk 1.
     """
     model = get_model()
-    kwargs = {}
-    if source_language_hint:
-        kwargs["language"] = source_language_hint
+    segments, info = model.transcribe(
+        audio_path,
+        language=source_language_hint,  # None = auto-detect
+        vad_filter=True,  # skip silence, slightly faster and cleaner text
+    )
+    text = " ".join(seg.text.strip() for seg in segments).strip()
+    detected_language = info.language if info and info.language else (source_language_hint or "unknown")
 
-    result = model.transcribe(audio_path, fp16=False, **kwargs)
-    return {
-        "text": result.get("text", "").strip(),
-        "language": result.get("language", source_language_hint or "unknown"),
-    }
+    return {"text": text, "language": detected_language}

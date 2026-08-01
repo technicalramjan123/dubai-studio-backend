@@ -1,11 +1,10 @@
 FROM python:3.11-slim
 
 # ffmpeg is required for audio/video extraction, chunking, and merging.
-# build-essential/rustc/cargo are required to compile some of
-# openai-whisper's sub-dependencies (e.g. tiktoken) which don't ship
-# pre-built wheels for every platform.
+# faster-whisper (used for transcription) ships prebuilt wheels, so no
+# compiler toolchain is needed here — keeps the build fast and reliable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg git curl build-essential rustc cargo \
+    ffmpeg git curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
