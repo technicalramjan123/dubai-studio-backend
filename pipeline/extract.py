@@ -133,36 +133,46 @@ def _build_atempo_chain(ratio: float) -> str:
 
 def fit_audio_duration(audio_path: str, target_duration: float, out_path: str):
     """
-    Stretches or compresses a dubbed audio chunk (via ffmpeg's atempo filter)
-    so it matches the original chunk's duration exactly, then pads/trims any
-    tiny remainder with silence. This keeps the dubbed track in sync with
-    the original video instead of drifting further out of sync with every
-    chunk (which happens because translated speech is rarely the same
-    length as the original).
+    Aligns a dubbed audio chunk's duration with the original chunk's
+    duration — but only within a natural-sounding speed range. Translated
+    speech is rarely the exact same length as the original, so instead of
+    stretching/compressing the voice aggressively (which makes it sound
+    slow and dragged, or unnaturally fast), we apply only a mild speed
+    correction (max ~15%) and fill any remaining gap with silence at the
+    end. This keeps the voice sounding natural while still preventing
+    drift from accumulating across chunks.
     """
     if target_duration <= 0.05:
         target_duration = 0.05
 
     current = get_duration_seconds(audio_path)
     if current <= 0.05:
-        # Nothing usable was generated — output silence of the right length.
         run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
              "-t", str(target_duration), out_path])
         return out_path
 
-    ratio = current / target_duration
+    raw_ratio = current / target_duration
+    # Only allow a mild, natural-sounding speed adjustment (0.85x-1.15x).
+    ratio = max(0.85, min(1.15, raw_ratio))
     atempo_expr = _build_atempo_chain(ratio)
 
     tmp_path = out_path + ".stretch.mp3"
     run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", atempo_expr, tmp_path])
 
-    # Pad with silence or trim so the final length matches exactly —
-    # atempo chaining can leave it off by a few milliseconds.
-    run([
-        "ffmpeg", "-y", "-i", tmp_path,
-        "-af", f"apad=whole_dur={target_duration}",
-        "-t", str(target_duration),
-        out_path
-    ])
+    stretched_duration = get_duration_seconds(tmp_path)
+
+    if stretched_duration >= target_duration:
+        # Still longer than the slot (translated speech was much longer) —
+        # trim rather than distort the voice further.
+        run(["ffmpeg", "-y", "-i", tmp_path, "-t", str(target_duration), out_path])
+    else:
+        # Pad the remainder with silence so total duration matches exactly,
+        # without slowing the voice down further.
+        run([
+            "ffmpeg", "-y", "-i", tmp_path,
+            "-af", f"apad=whole_dur={target_duration}",
+            "-t", str(target_duration),
+            out_path
+        ])
     os.remove(tmp_path)
     return out_path
