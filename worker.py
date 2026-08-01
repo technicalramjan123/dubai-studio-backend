@@ -1,8 +1,15 @@
 """
 Orchestrates a dubbing job end to end:
   download/locate source -> extract audio -> split into silence-aware
-  chunks -> per chunk: transcribe -> translate -> synthesize ->
-  stitch chunks back together -> (if video) merge with original video.
+  chunks -> per chunk: sentence-level transcribe -> translate each
+  sentence -> synthesize each sentence's voice -> place each dubbed
+  sentence at its correct timestamp (silence-padded) -> stitch chunks
+  together -> (if video) merge with original video.
+
+Sentence-level placement (rather than treating a whole multi-minute
+chunk as one blob) is what keeps the dubbed voice in sync with the
+original video's pacing, instead of drifting or sounding artificially
+slowed down.
 
 Runs in a background thread per job via a simple in-process queue
 (ThreadPoolExecutor) — no external queue service needed, which keeps
@@ -42,7 +49,7 @@ def set_status(session, job: Job, status: str, label: str, percent: float = None
     if percent is not None:
         job.progress_percent = percent
     session.commit()
-    logger.info(f"[{job.id}] {status} — {label} ({job.progress_percent:.0f}%)")
+    logger.info(f"[{job.id}] {status} - {label} ({job.progress_percent:.0f}%)")
 
 
 def submit_job(job_id: str):
@@ -106,88 +113,113 @@ def _process_job(session, job: Job):
     # --- Step 4: process each chunk (skip ones already done -> resumable) ---
     detected_source_lang = job.source_language
     translated_audio_paths = []
+    all_segments_global = []  # for accurate, sentence-level subtitles
 
     for i, chunk in enumerate(chunks):
         pct = 15 + (i / max(total_chunks, 1)) * 70
         set_status(session, job, "processing",
-                   f"Processing chunk {i + 1} of {total_chunks}...", pct)
+                   f"Processing chunk {i + 1} of {total_chunks} (sentence-by-sentence)...", pct)
 
         if chunk.status == "done" and chunk.audio_chunk_path and os.path.exists(chunk.audio_chunk_path):
             translated_audio_paths.append(chunk.audio_chunk_path)
+            if chunk.segments_json:
+                for seg in json.loads(chunk.segments_json):
+                    all_segments_global.append({
+                        "start": chunk.start_time + seg["start"],
+                        "end": chunk.start_time + seg["end"],
+                        "source_text": seg["source_text"],
+                        "translated_text": seg["translated_text"],
+                    })
             continue
 
-        try:
-            chunk_wav = os.path.join(wd, f"chunk_{chunk.index}.wav")
-            extract.split_audio_chunk(audio_path, chunk.start_time, chunk.end_time, chunk_wav)
+        attempt = 0
+        last_error = None
+        while attempt <= MAX_CHUNK_RETRIES:
+            try:
+                chunk_wav = os.path.join(wd, f"chunk_{chunk.index}.wav")
+                extract.split_audio_chunk(audio_path, chunk.start_time, chunk.end_time, chunk_wav)
 
-            # Transcribe
-            t = transcribe.transcribe_chunk(chunk_wav, source_language_hint=detected_source_lang)
-            chunk.source_text = t["text"]
-            if not detected_source_lang:
-                detected_source_lang = t["language"]
-                job.source_language = detected_source_lang
-            chunk.status = "transcribed"
-            session.commit()
-
-            # Translate
-            translated = translate.translate_text(
-                t["text"], detected_source_lang, job.target_language
-            )
-            chunk.translated_text = translated
-            chunk.status = "translated"
-            session.commit()
-
-            # Synthesize
-            chunk_tts_path = os.path.join(wd, f"chunk_{chunk.index}_dub.mp3")
-            tts.synthesize(translated, job.target_language, job.voice or "male", chunk_tts_path)
-
-            # Stretch/compress the generated speech to match the original
-            # chunk's exact duration so the dub doesn't drift out of sync
-            # with the video as chunks accumulate.
-            target_duration = chunk.end_time - chunk.start_time
-            fitted_path = os.path.join(wd, f"chunk_{chunk.index}_fitted.mp3")
-            extract.fit_audio_duration(chunk_tts_path, target_duration, fitted_path)
-
-            chunk.audio_chunk_path = fitted_path
-            chunk.status = "done"
-            chunk.error_message = None
-            session.commit()
-
-            translated_audio_paths.append(fitted_path)
-
-        except Exception as e:
-            chunk.retry_count += 1
-            chunk.error_message = str(e)
-            session.commit()
-            if chunk.retry_count <= MAX_CHUNK_RETRIES:
-                logger.warning(f"[{job.id}] chunk {chunk.index} failed, will retry: {e}")
-                try:
-                    # one retry inline
-                    chunk_tts_path = os.path.join(wd, f"chunk_{chunk.index}_dub.mp3")
-                    if not chunk.translated_text:
-                        t = transcribe.transcribe_chunk(chunk_wav, source_language_hint=detected_source_lang)
-                        chunk.source_text = t["text"]
-                        chunk.translated_text = translate.translate_text(
-                            t["text"], detected_source_lang, job.target_language)
-                    tts.synthesize(chunk.translated_text, job.target_language,
-                                    job.voice or "male", chunk_tts_path)
-
-                    target_duration = chunk.end_time - chunk.start_time
-                    fitted_path = os.path.join(wd, f"chunk_{chunk.index}_fitted.mp3")
-                    extract.fit_audio_duration(chunk_tts_path, target_duration, fitted_path)
-
-                    chunk.audio_chunk_path = fitted_path
-                    chunk.status = "done"
-                    chunk.error_message = None
+                result = transcribe.transcribe_chunk_segments(chunk_wav, source_language_hint=detected_source_lang)
+                segments = result["segments"]
+                if not detected_source_lang:
+                    detected_source_lang = result["language"]
+                    job.source_language = detected_source_lang
                     session.commit()
-                    translated_audio_paths.append(fitted_path)
-                    continue
-                except Exception as e2:
-                    chunk.error_message = str(e2)
-                    session.commit()
+
+                chunk_duration = chunk.end_time - chunk.start_time
+                parts = []
+                enriched_segments = []
+                prev_end = 0.0
+
+                if not segments:
+                    silence_path = os.path.join(wd, f"chunk_{chunk.index}_allsilence.mp3")
+                    extract.make_silence(chunk_duration, silence_path)
+                    chunk_audio_path = silence_path
+                else:
+                    for s_idx, seg in enumerate(segments):
+                        gap = seg["start"] - prev_end
+                        if gap > 0.08:
+                            gap_path = os.path.join(wd, f"chunk_{chunk.index}_gap_{s_idx}.mp3")
+                            extract.make_silence(gap, gap_path)
+                            parts.append(gap_path)
+
+                        translated_text = translate.translate_text(
+                            seg["text"], detected_source_lang, job.target_language)
+
+                        raw_tts_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_raw.mp3")
+                        tts.synthesize(translated_text, job.target_language,
+                                       job.voice or "male", raw_tts_path)
+
+                        seg_duration = max(0.2, seg["end"] - seg["start"])
+                        fitted_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_fit.mp3")
+                        extract.fit_audio_duration(raw_tts_path, seg_duration, fitted_path)
+                        parts.append(fitted_path)
+
+                        enriched_segments.append({
+                            "start": seg["start"], "end": seg["end"],
+                            "source_text": seg["text"], "translated_text": translated_text,
+                        })
+                        prev_end = seg["end"]
+
+                    trailing_gap = chunk_duration - prev_end
+                    if trailing_gap > 0.08:
+                        trail_path = os.path.join(wd, f"chunk_{chunk.index}_trail.mp3")
+                        extract.make_silence(trailing_gap, trail_path)
+                        parts.append(trail_path)
+
+                    chunk_audio_path = os.path.join(wd, f"chunk_{chunk.index}_final.mp3")
+                    extract.concat_audio_chunks(parts, chunk_audio_path, wd)
+
+                chunk.source_text = " ".join(s["text"] for s in segments)
+                chunk.translated_text = " ".join(s["translated_text"] for s in enriched_segments)
+                chunk.segments_json = json.dumps(enriched_segments, ensure_ascii=False)
+                chunk.audio_chunk_path = chunk_audio_path
+                chunk.status = "done"
+                chunk.error_message = None
+                session.commit()
+
+                translated_audio_paths.append(chunk_audio_path)
+                for seg in enriched_segments:
+                    all_segments_global.append({
+                        "start": chunk.start_time + seg["start"],
+                        "end": chunk.start_time + seg["end"],
+                        "source_text": seg["source_text"],
+                        "translated_text": seg["translated_text"],
+                    })
+                break  # chunk succeeded
+
+            except Exception as e:
+                attempt += 1
+                last_error = str(e)
+                chunk.retry_count = attempt
+                chunk.error_message = last_error
+                session.commit()
+                logger.warning(f"[{job.id}] chunk {chunk.index} attempt {attempt} failed: {e}")
+
+        else:
             chunk.status = "failed"
             session.commit()
-            raise RuntimeError(f"Chunk {chunk.index} failed after retries: {chunk.error_message}")
+            raise RuntimeError(f"Chunk {chunk.index} failed after {MAX_CHUNK_RETRIES} retries: {last_error}")
 
     # --- Step 5: stitch chunks back together ---
     set_status(session, job, "merging", "Combining dubbed audio...", 88)
@@ -202,17 +234,11 @@ def _process_job(session, job: Job):
         extract.merge_audio_with_video(job.input_path, final_audio, final_video)
         job.output_video_path = final_video
 
-    # --- Step 7: save transcript / subtitles ---
-    transcript = [
-        {
-            "index": c.index, "start": c.start_time, "end": c.end_time,
-            "source_text": c.source_text, "translated_text": c.translated_text,
-        }
-        for c in chunks
-    ]
-    job.transcript_json = json.dumps(transcript, ensure_ascii=False)
+    # --- Step 7: save transcript / subtitles (sentence-level, accurate timing) ---
+    all_segments_global.sort(key=lambda s: s["start"])
+    job.transcript_json = json.dumps(all_segments_global, ensure_ascii=False)
     srt_path = os.path.join(wd, "subtitles.srt")
-    _write_srt(transcript, srt_path)
+    _write_srt(all_segments_global, srt_path)
     job.srt_path = srt_path
 
     set_status(session, job, "done", "Completed", 100)
@@ -226,9 +252,9 @@ def _srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _write_srt(transcript, out_path):
+def _write_srt(segments, out_path):
     with open(out_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(transcript, start=1):
+        for i, seg in enumerate(segments, start=1):
             f.write(f"{i}\n")
             f.write(f"{_srt_timestamp(seg['start'])} --> {_srt_timestamp(seg['end'])}\n")
             f.write(f"{seg['translated_text'] or ''}\n\n")

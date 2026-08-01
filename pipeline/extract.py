@@ -114,6 +114,23 @@ def merge_audio_with_video(video_path: str, audio_path: str, out_path: str):
     return out_path
 
 
+def make_silence(duration: float, out_path: str, sample_rate: int = 24000):
+    """Generates a silent audio clip of the given duration (used to fill
+    natural pauses between sentence-level dubbed segments)."""
+    if duration <= 0.01:
+        duration = 0.01
+    run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=mono",
+        "-t", str(duration), "-acodec", "libmp3lame", out_path
+    ])
+    return out_path
+
+
+def generate_silence(duration: float, out_path: str):
+    """Alias of make_silence, kept for compatibility."""
+    return make_silence(duration, out_path)
+
+
 def _build_atempo_chain(ratio: float) -> str:
     """ffmpeg's atempo filter only accepts 0.5-2.0 per instance, so chain
     multiple atempo filters together to reach ratios outside that range."""

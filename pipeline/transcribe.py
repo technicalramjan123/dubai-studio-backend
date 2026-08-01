@@ -36,3 +36,28 @@ def transcribe_chunk(audio_path: str, source_language_hint: str = None):
     detected_language = info.language if info and info.language else (source_language_hint or "unknown")
 
     return {"text": text, "language": detected_language}
+
+
+def transcribe_chunk_segments(audio_path: str, source_language_hint: str = None):
+    """
+    Sentence-level transcription: returns each spoken segment with its own
+    start/end timestamps (relative to the start of this audio chunk), so
+    each sentence's dub can later be placed at the correct moment instead
+    of stretching a whole multi-minute chunk uniformly.
+
+    Returns: {"segments": [{"start": float, "end": float, "text": str}, ...], "language": str}
+    """
+    model = get_model()
+    segments_iter, info = model.transcribe(
+        audio_path,
+        language=source_language_hint,
+        vad_filter=True,
+    )
+    segments = []
+    for seg in segments_iter:
+        text = seg.text.strip()
+        if text:
+            segments.append({"start": seg.start, "end": seg.end, "text": text})
+
+    detected_language = info.language if info and info.language else (source_language_hint or "unknown")
+    return {"segments": segments, "language": detected_language}

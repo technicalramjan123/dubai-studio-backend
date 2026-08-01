@@ -58,6 +58,7 @@ class Chunk(Base):
     # pending -> transcribed -> translated -> synthesized -> done / failed
     source_text = Column(Text, nullable=True)
     translated_text = Column(Text, nullable=True)
+    segments_json = Column(Text, nullable=True)  # per-sentence {start,end,source_text,translated_text}, chunk-relative
     audio_chunk_path = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, default=0)
