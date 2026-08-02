@@ -20,6 +20,7 @@ process restarts mid-job, only unfinished chunks are reprocessed.
 """
 import os
 import json
+import shutil
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -260,7 +261,16 @@ def _process_job(session, job: Job):
     if job.media_type == "video":
         set_status(session, job, "merging", "Merging audio with video...", 94)
         final_video = os.path.join(wd, "final_dubbed_video.mp4")
-        extract.merge_audio_with_video(job.input_path, final_audio, final_video)
+        merge_input_path = job.input_path
+        if os.path.abspath(merge_input_path) == os.path.abspath(final_video):
+            # The uploaded file happens to be named the same as our fixed
+            # output filename (e.g. someone re-uploaded a previously
+            # downloaded dubbed result) — ffmpeg refuses to read and write
+            # the same file, so make a safe working copy first.
+            safe_input_copy = os.path.join(wd, "source_input_copy.mp4")
+            shutil.copyfile(merge_input_path, safe_input_copy)
+            merge_input_path = safe_input_copy
+        extract.merge_audio_with_video(merge_input_path, final_audio, final_video)
         job.output_video_path = final_video
 
     # --- Step 7: save transcript / subtitles (sentence-level, accurate timing) ---
