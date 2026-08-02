@@ -104,11 +104,17 @@ def concat_audio_chunks(chunk_paths: list, out_path: str, work_dir: str):
 
 
 def merge_audio_with_video(video_path: str, audio_path: str, out_path: str):
-    """Replace the audio track of a video with the newly generated dubbed audio."""
+    """
+    Replace the audio track of a video with the newly generated dubbed
+    audio. Deliberately does NOT use ffmpeg's -shortest flag: if the
+    dubbed speech ends up slightly longer than the original video (which
+    can happen when a translation naturally needs more time to say), we
+    let the audio play out in full rather than cutting the last words off.
+    """
     run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy", "-c:a", "aac", "-shortest",
+        "-c:v", "copy", "-c:a", "aac",
         out_path
     ])
     return out_path
@@ -150,14 +156,16 @@ def _build_atempo_chain(ratio: float) -> str:
 
 def fit_audio_duration(audio_path: str, target_duration: float, out_path: str):
     """
-    Aligns a dubbed audio chunk's duration with the original chunk's
-    duration — but only within a natural-sounding speed range. Translated
-    speech is rarely the exact same length as the original, so instead of
-    stretching/compressing the voice aggressively (which makes it sound
-    slow and dragged, or unnaturally fast), we apply only a mild speed
-    correction (max ~15%) and fill any remaining gap with silence at the
-    end. This keeps the voice sounding natural while still preventing
-    drift from accumulating across chunks.
+    Applies a MILD speed correction (max ~15% faster/slower) to nudge a
+    dubbed sentence's audio closer to the original sentence's duration.
+
+    IMPORTANT: this never cuts the audio short. Translated speech is
+    often naturally longer than the original (e.g. Bengali vs Hindi), and
+    trimming it to force an exact time slot would cut off the end of the
+    sentence — losing meaning is worse than imperfect timing. If the
+    audio is still longer than target_duration after the mild speed
+    correction, the full audio is kept as-is; the caller is responsible
+    for absorbing any overrun into the next gap (see worker.py).
     """
     if target_duration <= 0.05:
         target_duration = 0.05
@@ -173,23 +181,5 @@ def fit_audio_duration(audio_path: str, target_duration: float, out_path: str):
     ratio = max(0.85, min(1.15, raw_ratio))
     atempo_expr = _build_atempo_chain(ratio)
 
-    tmp_path = out_path + ".stretch.mp3"
-    run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", atempo_expr, tmp_path])
-
-    stretched_duration = get_duration_seconds(tmp_path)
-
-    if stretched_duration >= target_duration:
-        # Still longer than the slot (translated speech was much longer) —
-        # trim rather than distort the voice further.
-        run(["ffmpeg", "-y", "-i", tmp_path, "-t", str(target_duration), out_path])
-    else:
-        # Pad the remainder with silence so total duration matches exactly,
-        # without slowing the voice down further.
-        run([
-            "ffmpeg", "-y", "-i", tmp_path,
-            "-af", f"apad=whole_dur={target_duration}",
-            "-t", str(target_duration),
-            out_path
-        ])
-    os.remove(tmp_path)
+    run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", atempo_expr, out_path])
     return out_path

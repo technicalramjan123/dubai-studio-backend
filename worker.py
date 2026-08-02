@@ -158,6 +158,8 @@ def _process_job(session, job: Job):
                 else:
                     total_segments = len(segments)
                     chunk_pct_span = 70 / max(total_chunks, 1)
+                    audio_cursor = 0.0  # actual elapsed time in the dubbed track so far
+
                     for s_idx, seg in enumerate(segments):
                         set_status(
                             session, job, "processing",
@@ -165,11 +167,18 @@ def _process_job(session, job: Job):
                             pct + (s_idx / max(total_segments, 1)) * chunk_pct_span
                         )
 
-                        gap = seg["start"] - prev_end
+                        # Only insert silence if the dubbed track's actual
+                        # position is still behind the original speaker's
+                        # start time. If a previous sentence ran long, skip
+                        # the gap instead of rewinding — we never cut audio,
+                        # so occasionally running a little behind is the
+                        # honest trade-off.
+                        gap = seg["start"] - audio_cursor
                         if gap > 0.08:
                             gap_path = os.path.join(wd, f"chunk_{chunk.index}_gap_{s_idx}.mp3")
                             extract.make_silence(gap, gap_path)
                             parts.append(gap_path)
+                            audio_cursor += gap
 
                         try:
                             translated_text = translate.translate_text(
@@ -178,16 +187,17 @@ def _process_job(session, job: Job):
                             translated_text = seg["text"]  # fall back to untranslated rather than failing the chunk
 
                         raw_tts_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_raw.mp3")
-                        seg_duration = max(0.2, seg["end"] - seg["start"])
+                        seg_duration_hint = max(0.2, seg["end"] - seg["start"])
                         try:
                             tts.synthesize(translated_text, job.target_language,
                                            job.voice or "male", raw_tts_path)
                         except Exception:
-                            extract.make_silence(seg_duration, raw_tts_path)  # skip this sentence's audio rather than failing the chunk
+                            extract.make_silence(seg_duration_hint, raw_tts_path)  # skip this sentence's audio rather than failing the chunk
 
                         fitted_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_fit.mp3")
-                        extract.fit_audio_duration(raw_tts_path, seg_duration, fitted_path)
+                        extract.fit_audio_duration(raw_tts_path, seg_duration_hint, fitted_path)
                         parts.append(fitted_path)
+                        audio_cursor += extract.get_duration_seconds(fitted_path)
 
                         enriched_segments.append({
                             "start": seg["start"], "end": seg["end"],
@@ -195,11 +205,16 @@ def _process_job(session, job: Job):
                         })
                         prev_end = seg["end"]
 
-                    trailing_gap = chunk_duration - prev_end
+                    trailing_gap = chunk_duration - audio_cursor
                     if trailing_gap > 0.08:
                         trail_path = os.path.join(wd, f"chunk_{chunk.index}_trail.mp3")
                         extract.make_silence(trailing_gap, trail_path)
                         parts.append(trail_path)
+                    # If audio_cursor overran chunk_duration (translated
+                    # speech needed more room than the original), we
+                    # deliberately do NOT trim — the chunk's dubbed audio
+                    # will simply be a little longer than the original
+                    # chunk, which is far better than cutting words off.
 
                     chunk_audio_path = os.path.join(wd, f"chunk_{chunk.index}_final.mp3")
                     extract.concat_audio_chunks(parts, chunk_audio_path, wd)
