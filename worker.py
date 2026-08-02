@@ -156,21 +156,35 @@ def _process_job(session, job: Job):
                     extract.make_silence(chunk_duration, silence_path)
                     chunk_audio_path = silence_path
                 else:
+                    total_segments = len(segments)
+                    chunk_pct_span = 70 / max(total_chunks, 1)
                     for s_idx, seg in enumerate(segments):
+                        set_status(
+                            session, job, "processing",
+                            f"Chunk {i + 1}/{total_chunks} — sentence {s_idx + 1}/{total_segments}...",
+                            pct + (s_idx / max(total_segments, 1)) * chunk_pct_span
+                        )
+
                         gap = seg["start"] - prev_end
                         if gap > 0.08:
                             gap_path = os.path.join(wd, f"chunk_{chunk.index}_gap_{s_idx}.mp3")
                             extract.make_silence(gap, gap_path)
                             parts.append(gap_path)
 
-                        translated_text = translate.translate_text(
-                            seg["text"], detected_source_lang, job.target_language)
+                        try:
+                            translated_text = translate.translate_text(
+                                seg["text"], detected_source_lang, job.target_language)
+                        except Exception:
+                            translated_text = seg["text"]  # fall back to untranslated rather than failing the chunk
 
                         raw_tts_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_raw.mp3")
-                        tts.synthesize(translated_text, job.target_language,
-                                       job.voice or "male", raw_tts_path)
-
                         seg_duration = max(0.2, seg["end"] - seg["start"])
+                        try:
+                            tts.synthesize(translated_text, job.target_language,
+                                           job.voice or "male", raw_tts_path)
+                        except Exception:
+                            extract.make_silence(seg_duration, raw_tts_path)  # skip this sentence's audio rather than failing the chunk
+
                         fitted_path = os.path.join(wd, f"chunk_{chunk.index}_seg_{s_idx}_fit.mp3")
                         extract.fit_audio_duration(raw_tts_path, seg_duration, fitted_path)
                         parts.append(fitted_path)

@@ -42,5 +42,8 @@ def synthesize(text: str, target_lang: str, voice_gender: str, out_path: str):
         return out_path
 
     voice = resolve_voice(target_lang, voice_gender)
-    asyncio.run(_synthesize_async(text, voice, out_path))
+    try:
+        asyncio.run(asyncio.wait_for(_synthesize_async(text, voice, out_path), timeout=20))
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"Edge-TTS timed out generating speech for: {text[:50]!r}")
     return out_path

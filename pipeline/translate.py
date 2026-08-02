@@ -7,7 +7,6 @@ Translation using free services only:
      instead of failing the whole chunk.
 """
 import os
-import time
 import requests
 
 LIBRETRANSLATE_URL = os.environ.get(
@@ -30,7 +29,7 @@ def _translate_libretranslate(text: str, source: str, target: str) -> str:
     if LIBRETRANSLATE_API_KEY:
         payload["api_key"] = LIBRETRANSLATE_API_KEY
 
-    resp = requests.post(LIBRETRANSLATE_URL, data=payload, timeout=30)
+    resp = requests.post(LIBRETRANSLATE_URL, data=payload, timeout=8)
     resp.raise_for_status()
     data = resp.json()
     if "translatedText" not in data:
@@ -48,31 +47,32 @@ def _translate_google_free(text: str, source: str, target: str) -> str:
         "dt": "t",
         "q": text,
     }
-    resp = requests.get(url, params=params, timeout=30)
+    resp = requests.get(url, params=params, timeout=8)
     resp.raise_for_status()
     data = resp.json()
     translated = "".join(segment[0] for segment in data[0] if segment[0])
     return translated
 
 
-def translate_text(text: str, source_lang: str, target_lang: str,
-                    retries: int = 2) -> str:
+def translate_text(text: str, source_lang: str, target_lang: str) -> str:
+    """
+    Google's free endpoint is used first since it's fast and reliable for
+    this use case. LibreTranslate's public instance is often rate-limited
+    or slow, so it's kept only as a fallback (with a short timeout) rather
+    than retried repeatedly — retrying a rate-limited endpoint several
+    times per sentence was adding minutes of delay per sentence on longer
+    videos.
+    """
     if not text.strip():
         return ""
 
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            return _translate_libretranslate(text, source_lang, target_lang)
-        except Exception as e:
-            last_error = e
-            time.sleep(1.5 * (attempt + 1))
-
-    # Fallback engine
     try:
         return _translate_google_free(text, source_lang, target_lang)
-    except Exception as e:
-        raise TranslationError(
-            f"Both translation engines failed. LibreTranslate error: {last_error}; "
-            f"Google fallback error: {e}"
-        )
+    except Exception as google_error:
+        try:
+            return _translate_libretranslate(text, source_lang, target_lang)
+        except Exception as libre_error:
+            raise TranslationError(
+                f"Both translation engines failed. Google error: {google_error}; "
+                f"LibreTranslate error: {libre_error}"
+            )
